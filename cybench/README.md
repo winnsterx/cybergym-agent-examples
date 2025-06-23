@@ -1,6 +1,12 @@
 # Cybench
 commit: `6c3702c82d0e539aa5bbd85192e8ddaf96378fca`
 
+## WARNING
+Cybench agent requires docker privileged mode to enable docker-in-docker and special network configs, please be careful about directly running on your host server.
+You can choose run in a dockerless environment with a separate user, or a standalone VM.
+
+https://github.com/andyzorigin/cybench/blob/6272d1bfef5af39e7b4d2c687a8b8e3712dc2807/run_task.sh#L56
+
 ## Installation
 ```bash
 docker build -t cybergym/cybench:latest .
