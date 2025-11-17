@@ -4,6 +4,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,6 +120,9 @@ class TaskArgs:
     difficulty: TaskDifficulty = TaskDifficulty.level1
     """Difficulty level of the task"""
 
+    evaluation_mode: str = "exploit"
+    """Evaluation mode: exploit (PoC) or re (reverse engineering pseudocode)"""
+
 
 def validate_output(log_dir: Path):
     traj_json = log_dir / "trajectory"
@@ -152,7 +156,9 @@ def get_api_key(model: str):
     return api_key
 
 
-def get_prompt_file(model: str):
+def get_prompt_file(model: str, evaluation_mode: str = "exploit"):
+    if evaluation_mode == "reverse_engineering":
+        return "prompt.re.txt"
     # if "o4-mini" in model or "o3-" in model:
     #     return "prompt.o4-mini.txt"
     return "prompt.txt"
@@ -165,10 +171,10 @@ def support_native_tool_calling(model: str):
 
 
 def _cleanup_docker_container(log_dir: Path):
-    # try to read the container name from the log dir
+    # Extract container ID from logs
     log_files = list(log_dir.glob("*.log"))
     if not log_files:
-        logger.warning(f"Log files not found in: {log_dir / 'logs'}")
+        logger.warning(f"Log files not found in: {log_dir}")
         return
     # "runtime d1a7102c-cf4e-46df-9483-dbbeb753585d-588e94af345e82b0"
     pat = re.compile(r"runtime ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{16})")
@@ -181,24 +187,73 @@ def _cleanup_docker_container(log_dir: Path):
         else:
             logger.warning(f"Container ID not found in: {log_files[0]}")
             return
-    # remove the container
-    client = docker.from_env()
+
+    container_name = f"openhands-runtime-{container_id}"
+
     try:
-        container = client.containers.get(f"openhands-runtime-{container_id}")
-        container.remove(force=True)
-        logger.info(f"Removed container {container_id}")
-    except docker.errors.APIError as e:
-        logger.warning(f"Container {container_id}, error: {e}")
-        # Attempt cleanup with sudo as fallback
-        try:
-            subprocess.run(  # noqa: S603
-                ["sudo", "docker", "rm", "-f", f"openhands-runtime-{container_id}"],
-                check=True,
-                timeout=10,
-            )
-            logger.info(f"Removed container {container_id} with sudo")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as sudo_error:
-            logger.warning(f"Failed to remove container {container_id} even with sudo: {sudo_error}")
+        # Step 1: Try to stop container
+        logger.debug(f"Attempting to stop container {container_id}...")
+        subprocess.run(  # noqa: S603
+            ["docker", "stop", "--time=5", container_name],
+            timeout=15,
+            capture_output=True,
+            check=False,
+        )
+
+        # Step 2: Try to remove container
+        logger.debug(f"Attempting to remove container {container_id}...")
+        result = subprocess.run(  # noqa: S603
+            ["docker", "rm", "-f", container_name],
+            timeout=15,
+            capture_output=True,
+            check=False,
+        )
+
+        if result.returncode == 0:
+            logger.info(f"Removed container {container_id}")
+            return
+        else:
+            logger.debug(f"docker rm failed, attempting force kill...")
+
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        logger.debug("docker command not available, attempting force kill...")
+
+    # Fallback: Force kill the container process
+    try:
+        # Get container PID
+        result = subprocess.run(  # noqa: S603
+            ["docker", "inspect", "--format={{.State.Pid}}", container_name],
+            timeout=5,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if result.returncode == 0:
+            pid = result.stdout.strip()
+            if pid and pid != "0":
+                logger.debug(f"Force killing container process (PID: {pid})")
+                subprocess.run(  # noqa: S603
+                    ["sudo", "kill", "-9", pid],
+                    timeout=5,
+                    capture_output=True,
+                    check=False,
+                )
+                # Give process time to die
+                time.sleep(0.5)
+
+        # Remove container with sudo
+        logger.debug(f"Removing container with sudo...")
+        subprocess.run(  # noqa: S603
+            ["sudo", "docker", "rm", "-f", container_name],
+            timeout=15,
+            capture_output=True,
+            check=False,
+        )
+        logger.info(f"Removed container {container_id} with force kill")
+
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning(f"Failed to remove container {container_id}: {e}")
 
 
 def run_openhands(
@@ -263,7 +318,85 @@ def run_openhands(
     except Exception as e:
         logger.error(f"Error running OpenHands: {e}")
     finally:
-        _cleanup_docker_container(log_dir)
+        _cleanup_docker_container(log_dir=log_dir)
+
+
+def trigger_judge_evaluation(task_args: TaskArgs, agent_id: str, log_dir: Path) -> bool:
+    """
+    Trigger judge evaluation for reverse engineering submissions.
+
+    Runs judge runner as subprocess with 10 minute timeout. Synchronous - waits
+    for completion. Saves judge output to logs. Non-fatal on failure.
+
+    Args:
+        task_args: Task configuration (task_id, data_dir, etc)
+        agent_id: Agent ID for logging context
+        log_dir: Log directory for saving judge output
+
+    Returns:
+        True if judge completed successfully (returncode 0), False otherwise
+    """
+    # Use database path from server (matches server startup configuration)
+    db_path = Path.cwd() / "server_poc" / "poc.db"
+
+    # Fall back to default poc.db if server_poc doesn't exist
+    if not db_path.parent.exists():
+        db_path = Path.cwd() / "poc.db"
+
+    # Use the judge runner script in the same directory
+    judge_script = SCRIPT_DIR / "judge.py"
+
+    cmd = [
+        "uv", "run", str(judge_script),
+        "--db", str(db_path),
+        "--data-dir", str(task_args.data_dir),
+        "--task", task_args.task_id,
+        "--model", "claude-sonnet-4-5-20250929"
+    ]
+
+    logger.info(f"Triggering judge evaluation: {' '.join(cmd)}")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            timeout=600,  # 10 minutes timeout
+            check=False,  # Don't raise on non-zero exit
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        # Save judge output to log file
+        judge_log = log_dir / "judge.log"
+        try:
+            with open(judge_log, "w") as f:
+                f.write(f"Command: {' '.join(cmd)}\n")
+                f.write(f"Return code: {result.returncode}\n\n")
+                f.write("=== STDOUT ===\n")
+                f.write(result.stdout)
+                if result.stderr:
+                    f.write("\n=== STDERR ===\n")
+                    f.write(result.stderr)
+            logger.info(f"Judge output saved to {judge_log}")
+        except Exception as e:
+            logger.warning(f"Failed to save judge log: {e}")
+
+        if result.returncode == 0:
+            logger.info(f"Judge evaluation completed successfully for {task_args.task_id}")
+            return True
+        else:
+            logger.warning(
+                f"Judge evaluation failed (non-fatal): returncode={result.returncode}, "
+                f"stderr: {result.stderr[:200] if result.stderr else 'none'}"
+            )
+            return False
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Judge evaluation timed out after 600s (non-fatal)")
+        return False
+    except Exception as e:
+        logger.warning(f"Judge evaluation error: {e} (non-fatal)")
+        return False
 
 
 def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs):
@@ -299,6 +432,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs):
         server=task_args.server,
         difficulty=task_args.difficulty,
         agent_id=agent_id,
+        evaluation_mode=task_args.evaluation_mode,
     )
 
     task = generate_task(task_config)
@@ -347,7 +481,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs):
         f.write(tomli_w.dumps(config))
 
     # 4. run the openhands agent
-    prompt_file = get_prompt_file(openhands_args.llm.model)
+    prompt_file = get_prompt_file(openhands_args.llm.model, task_args.evaluation_mode)
     run_openhands(
         config_path=config_path,
         prompt_path=tmp_input_dir / "template" / prompt_file,
@@ -362,12 +496,23 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs):
         enable_thinking=enable_thinking,
     )
 
-    # 5. remove the tmp directory
+    # 5. Trigger judge evaluation if RE mode (synchronous, non-fatal)
+    if task_args.evaluation_mode == "reverse_engineering":
+        try:
+            judge_ok = trigger_judge_evaluation(task_args, agent_id, log_dir / "logs")
+            if judge_ok:
+                logger.info(f"Judge evaluation completed successfully for {task_args.task_id}")
+            else:
+                logger.warning(f"Judge evaluation failed (non-fatal), agent still completed")
+        except Exception as e:
+            logger.warning(f"Error triggering judge: {e} (non-fatal)")
+
+    # 6. remove the tmp directory
     if openhands_args.remove_tmp:
         shutil.rmtree(tmp_input_dir, ignore_errors=True)
         logger.info(f"Removing temporary input directory: {tmp_input_dir}")
 
-    # 6. validate the output
+    # 7. validate the output
     is_valid = validate_output(log_dir)
 
     return agent_id if is_valid else None
