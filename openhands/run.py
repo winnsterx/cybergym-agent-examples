@@ -147,7 +147,6 @@ def get_api_key(model: str):
     else:
         env_var = "LLM_API_KEY"
     api_key = os.getenv(env_var)
-
     if api_key is None:
         api_key = "EMPTY"
     return api_key
@@ -190,6 +189,16 @@ def _cleanup_docker_container(log_dir: Path):
         logger.info(f"Removed container {container_id}")
     except docker.errors.APIError as e:
         logger.warning(f"Container {container_id}, error: {e}")
+        # Attempt cleanup with sudo as fallback
+        try:
+            subprocess.run(  # noqa: S603
+                ["sudo", "docker", "rm", "-f", f"openhands-runtime-{container_id}"],
+                check=True,
+                timeout=10,
+            )
+            logger.info(f"Removed container {container_id} with sudo")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as sudo_error:
+            logger.warning(f"Failed to remove container {container_id} even with sudo: {sudo_error}")
 
 
 def run_openhands(
@@ -330,7 +339,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs):
     native_tool_calling = openhands_args.llm.native_tool_calling
     if native_tool_calling is not None:
         config["llm"]["native_tool_calling"] = native_tool_calling
-    
+
     if openhands_args.llm.seed is not None:
         config["llm"]["seed"] = openhands_args.llm.seed
 

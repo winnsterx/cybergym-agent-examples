@@ -168,6 +168,11 @@ class LLM(RetryMixin, DebugMixin):
             kwargs['max_tokens'] = self.config.max_output_tokens
             kwargs.pop('max_completion_tokens')
 
+        # Claude models don't support both temperature and top_p, only use temperature
+        completion_kwargs = {}
+        if not self.config.model.startswith('claude-'):
+            completion_kwargs['top_p'] = self.config.top_p
+
         self._completion = partial(
             litellm_completion,
             model=self.config.model,
@@ -178,10 +183,10 @@ class LLM(RetryMixin, DebugMixin):
             api_version=self.config.api_version,
             custom_llm_provider=self.config.custom_llm_provider,
             timeout=self.config.timeout,
-            top_p=self.config.top_p,
             drop_params=self.config.drop_params,
             seed=self.config.seed,
             **kwargs,
+            **completion_kwargs,
         )
 
         self._completion_unwrapped = self._completion
@@ -215,7 +220,7 @@ class LLM(RetryMixin, DebugMixin):
                 args = args[2:]
             elif 'messages' in kwargs:
                 messages = kwargs['messages']
-            
+
 
             # ensure we work with a list of messages
             messages = messages if isinstance(messages, list) else [messages]
@@ -265,7 +270,7 @@ class LLM(RetryMixin, DebugMixin):
             # if we're not using litellm proxy, remove the extra_body
             if 'litellm_proxy' not in self.config.model:
                 kwargs.pop('extra_body', None)
-            
+
             if "gemini-2.5" in self.config.model:
                 if not os.getenv("CYBERGYM_ENABLE_THINKING"):
                     kwargs["thinking"] = {"type": "disabled", "budget_tokens": 0}
