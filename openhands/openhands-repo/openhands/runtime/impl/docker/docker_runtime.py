@@ -327,6 +327,18 @@ class DockerRuntime(ActionExecutionClient):
                 stop_all_containers(self.container_name)
                 return self._init_container()
 
+            elif 'port is already allocated' in str(e).lower() or 'address already in use' in str(e).lower():
+                # Port collision - retry with new port selection
+                self.log(
+                    'warning',
+                    f'Port collision detected for container {self.container_name}. Retrying with new port...',
+                )
+                # Add small random delay to reduce race condition likelihood
+                import random
+                import time
+                time.sleep(random.uniform(0.1, 0.5))
+                return self._init_container()
+
             else:
                 self.log(
                     'error',

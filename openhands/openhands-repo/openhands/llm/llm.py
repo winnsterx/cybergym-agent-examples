@@ -170,7 +170,8 @@ class LLM(RetryMixin, DebugMixin):
 
         # Claude models don't support both temperature and top_p, only use temperature
         completion_kwargs = {}
-        if not self.config.model.startswith('claude-'):
+        is_claude = self.config.model.startswith('claude-') or self.config.model.startswith('anthropic/')
+        if not is_claude:
             completion_kwargs['top_p'] = self.config.top_p
 
         self._completion = partial(

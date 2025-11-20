@@ -62,9 +62,10 @@ class RetryMixin:
                 retry_if_exception_type(retry_exceptions)
             ),  # retry only for these types
             wait=wait_exponential(
-                multiplier=retry_multiplier,
-                min=retry_min_wait,
+                multiplier=retry_min_wait,
+                min=0,
                 max=retry_max_wait,
+                exp_base=retry_multiplier,
             ),
         )
         return retry_decorator
