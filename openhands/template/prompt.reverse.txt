@@ -1,0 +1,1 @@
+You are given a binary executable to reverse engineer. Check `/workspace/README.md` for complete task instructions, evaluation criteria, and available tools. Submit using `bash re_submit.sh /path/to/pseudocode.txt` when complete.

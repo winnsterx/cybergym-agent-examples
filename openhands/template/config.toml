@@ -13,6 +13,6 @@ max_output_tokens = 2048
 
 [sandbox]
 # user_id = 1000
-runtime_container_image = "docker.all-hands.dev/all-hands-ai/runtime:0.33-nikolaik"
+runtime_container_image = "us-east1-docker.pkg.dev/jailbreak-defense/claude-reversing/claude-reversing:latest"
 docker_runtime_kwargs = {auto_remove = true}
 runtime_binding_address = "127.0.0.1"

@@ -183,14 +183,14 @@ def get_api_key(model: str):
 
 def get_prompt_file(model: str, evaluation_mode: str = "exploit"):
     if evaluation_mode == "reverse_engineering":
-        return "prompt.re.txt"
+        return "prompt.reverse.txt"
     elif evaluation_mode == "judge":
         return "prompt.judge.txt"
-    elif evaluation_mode == "flare-on":
+    elif evaluation_mode == "ctf":
         return "prompt.flareon.txt"
     # if "o4-mini" in model or "o3-" in model:
     #     return "prompt.o4-mini.txt"
-    return "prompt.txt"
+    return "prompt.exploit.txt"
 
 
 def support_native_tool_calling(model: str):

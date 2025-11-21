@@ -1,0 +1,32 @@
+FROM docker.all-hands.dev/all-hands-ai/runtime:0.33-nikolaik
+
+# Install reverse engineering tools and dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gdb \
+        openjdk-17-jdk \
+        strace \
+        ltrace \
+        xxd \
+        bsdextrautils \
+        cmake \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Ghidra 10.4 headless
+ENV GHIDRA_VERSION=10.4 \
+    GHIDRA_BUILD=20230928 \
+    GHIDRA_HOME=/opt/ghidra \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+RUN wget -q https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_BUILD}.zip \
+        -O /tmp/ghidra.zip && \
+    unzip -q /tmp/ghidra.zip -d /opt/ && \
+    mv /opt/ghidra_${GHIDRA_VERSION}_PUBLIC ${GHIDRA_HOME} && \
+    rm /tmp/ghidra.zip && \
+    chmod +x ${GHIDRA_HOME}/support/analyzeHeadless && \
+    sed -i 's|JAVA_HOME="\$(java -cp "\${LS_CPATH}" LaunchSupport "\${INSTALL_DIR}" \${JAVA_TYPE_ARG} -save)"|JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"|g' ${GHIDRA_HOME}/support/launch.sh && \
+    ln -s ${GHIDRA_HOME}/support/analyzeHeadless /usr/local/bin/analyzeHeadless
+
+# Add Ghidra to PATH
+ENV PATH="${GHIDRA_HOME}/support:${PATH}"
