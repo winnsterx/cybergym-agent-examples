@@ -1,0 +1,1163 @@
+You are an expert reverse engineer who is evaluating another reverse engineer's decompilation capabilities by comparing their code against the original source code.
+
+Check `/workspace/metadata.json` for task context. You have access to:
+1. `/workspace/pseudocode.txt` - The engineer's reverse-engineered pseudocode
+2. `/workspace/repo-vul.tar.gz` - The original source code tarball (needs extraction)
+
+Your evaluation is focused on the **interpretability** of the decompiled code.
+One way to think about how to approach grading the decompiled code is that: if the decompiled code were given to a malware analysis expert, how immediately can they read and understand the code to start their job?
+We are evaluating the functional correctness using I/O testing, so your focus should be on the interpretability and semantic similarity. If the code were functionally correct but completely non-interpretable, it serves little marginal benefit than the binary to a malware analysis expert.
+
+To ensure a standardized process, you are asked to grade the decompiled code against a rubric while constantly referencing the original source code.
+The rubric consists of 4 sections, each composed of sub-sections:
+1. Structural semantic similarity: does the decompiled code reflect the true control and data flow of the source code in an easily human-understandable way?
+2. Type and data structure similarity: does the decompiled code expose the right data models?
+3. Identifier semantic similarity: do the names of variables, functions, and fields tell a helpful story about the roles?
+4. Overall readability and organization: is information presented in a helpful and non-destructive way via formatting, comments, logical groupings, etc?
+
+You should examine the decompiled code and compare it against the source code thoroughly.
+Then, for each subsection, you should provide a score of 1, 0, or -1 corresponding to the criteria specified below.
+
+---
+
+## **IMPORTANT: Sub-Criterion Independence**
+
+Each sub-criterion within a section measures a DIFFERENT aspect that can fail independently. When evaluating:
+
+1. **Assume other aspects are correct** when evaluating a specific sub-criterion
+2. **Focus narrowly** on what that sub-criterion measures
+3. **Don't cascade penalties** - a single error should only hit the most relevant sub-criterion
+
+For example, in Section 1:
+- If control flow STRUCTURE is wrong but conditions are right → only penalize 1.1
+- If structure is right but CONDITIONS are wrong → only penalize 1.2
+- If both structure and conditions are right but STATE UPDATES are wrong → only penalize 1.3
+
+---
+
+# RUBRIC
+
+## **1. Structural Semantic Similarity**
+
+### 1.1 High-level control-flow shapes
+
+**What this measures:** The STRUCTURE of control constructs (type of construct used)
+**Assumes:** Conditions are correct (that's 1.2)
+**Focus:** Is the right kind of control structure used? (if/else vs switch, for vs while, early return vs fall-through)
+
+- **Evaluation Choices:**
+    - **1:** Control structures clearly correspond to the source. The right structural primitives are used (switch vs cascading ifs, for vs while, early returns vs flags). Nesting depth and structure match.
+    - **0:** Semantically equivalent but needlessly low-level structure (e.g., while + flag instead of for loop; cascading ifs instead of switch). Behavior is the same but structure is less idiomatic.
+    - **-1:** Control structure type is wrong in a way that obscures the original pattern (e.g., loop replaced with recursion; switch flattened into unrecognizable goto soup; missing structural elements like early returns replaced with deeply nested conditionals).
+
+- **Example:**
+    - **Source code:**
+        ```c
+        // Clean switch for 4 message types
+        void handle_message(int msg_type) {
+            switch (msg_type) {
+                case MSG_HELLO: handle_hello(); break;
+                case MSG_DATA:  handle_data(); break;
+                case MSG_ACK:   handle_ack(); break;
+                case MSG_BYE:   handle_bye(); break;
+            }
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        void handle_message(int msg_type) {
+            switch (msg_type) {
+                case MSG_HELLO: handle_hello(); break;
+                case MSG_DATA:  handle_data(); break;
+                case MSG_ACK:   handle_ack(); break;
+                case MSG_BYE:   handle_bye(); break;
+            }
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Same behavior, all paths present, conditions correct
+        // BUT uses if-else chain instead of switch (less idiomatic)
+        void handle_message(int msg_type) {
+            if (msg_type == MSG_HELLO) {
+                handle_hello();
+            } else if (msg_type == MSG_DATA) {
+                handle_data();
+            } else if (msg_type == MSG_ACK) {
+                handle_ack();
+            } else if (msg_type == MSG_BYE) {
+                handle_bye();
+            }
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // Uses goto-based state machine instead of clean switch
+        // Structure is completely obscured
+        void handle_message(int msg_type) {
+            int state = 0;
+        check_state:
+            if (state == 0) {
+                if (msg_type == MSG_HELLO) { state = 1; goto handle; }
+                if (msg_type == MSG_DATA) { state = 2; goto handle; }
+                if (msg_type == MSG_ACK) { state = 3; goto handle; }
+                if (msg_type == MSG_BYE) { state = 4; goto handle; }
+            }
+            return;
+        handle:
+            if (state == 1) handle_hello();
+            else if (state == 2) handle_data();
+            else if (state == 3) handle_ack();
+            else if (state == 4) handle_bye();
+        }
+        ```
+
+---
+
+### 1.2 Branch / loop condition semantics
+
+**What this measures:** The LOGIC of predicates and conditions
+**Assumes:** Structure is correct (that's 1.1), state updates are correct (that's 1.3)
+**Focus:** Are the boolean conditions, comparisons, and loop predicates semantically correct?
+
+- **Evaluation Choices:**
+    - **1:** Branch conditions and loop predicates match source logic. Edge cases (==, !=, <, <=, >, >=), boolean operators (&&, ||, !), and special comparisons (null checks, sign) are preserved.
+    - **0:** Logically equivalent but expressed in a more complex way (e.g., De Morgan transformations, redundant checks, nested conditions instead of compound predicates). Semantics are equivalent but harder to read.
+    - **-1:** Any condition is wrong (wrong comparison operator, wrong boolean logic, missing clause, reversed logic, off-by-one). This causes different execution paths to be taken.
+
+- **Example:**
+    - **Source code:**
+        ```c
+        // Process items where BOTH flags are set
+        void process_items(struct item *items, int count) {
+            for (int i = 0; i < count; i++) {
+                if ((items[i].flags & FLAG_VALID) && (items[i].flags & FLAG_READY)) {
+                    process(&items[i]);
+                }
+            }
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        void process_items(struct item *items, int count) {
+            for (int i = 0; i < count; i++) {
+                if ((items[i].flags & FLAG_VALID) && (items[i].flags & FLAG_READY)) {
+                    process(&items[i]);
+                }
+            }
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Equivalent logic but more verbose (nested ifs instead of &&)
+        void process_items(struct item *items, int count) {
+            for (int i = 0; i < count; i++) {
+                if (items[i].flags & FLAG_VALID) {
+                    if (items[i].flags & FLAG_READY) {
+                        process(&items[i]);
+                    }
+                }
+            }
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // WRONG: AND changed to OR - processes different items!
+        void process_items(struct item *items, int count) {
+            for (int i = 0; i < count; i++) {
+                if ((items[i].flags & FLAG_VALID) || (items[i].flags & FLAG_READY)) {
+                    process(&items[i]);
+                }
+            }
+        }
+        ```
+
+---
+
+### 1.3 Data-flow and state transitions
+
+**What this measures:** How VARIABLES EVOLVE over time
+**Assumes:** Structure (1.1) and conditions (1.2) are correct
+**Focus:** Are variable updates, assignments, increments, resets, and flag modifications correct?
+
+- **Evaluation Choices:**
+    - **1:** Variable evolution matches source. Increments, resets, assignments, and flag flips happen in the right places. State machine transitions, counters, and accumulators evolve correctly.
+    - **0:** Same eventual state but via unnecessarily complex means (extra temporaries, redundant assignments, manual state encodings). A careful analyst can reconstruct correct transitions.
+    - **-1:** State updates differ from source (missing increment/reset, wrong assignment operator, flag never set/cleared, accumulator vs assignment confusion). Analysis would produce wrong conclusions about program state.
+
+- **Example:**
+    - **Source code:**
+        ```c
+        // Accumulate sum of positive items
+        int sum_positive(int *items, int count) {
+            int total = 0;
+            for (int i = 0; i < count; i++) {
+                if (items[i] > 0) {
+                    total += items[i];  // accumulation
+                }
+            }
+            return total;
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        int sum_positive(int *items, int count) {
+            int total = 0;
+            for (int i = 0; i < count; i++) {
+                if (items[i] > 0) {
+                    total += items[i];
+                }
+            }
+            return total;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Same result but uses extra temporary
+        int sum_positive(int *items, int count) {
+            int total = 0;
+            for (int i = 0; i < count; i++) {
+                if (items[i] > 0) {
+                    int temp = items[i];
+                    int new_total = total + temp;
+                    total = new_total;
+                }
+            }
+            return total;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // WRONG: assignment instead of accumulation!
+        // Only keeps last positive value, not sum
+        int sum_positive(int *items, int count) {
+            int total = 0;
+            for (int i = 0; i < count; i++) {
+                if (items[i] > 0) {
+                    total = items[i];  // BUG: = instead of +=
+                }
+            }
+            return total;
+        }
+        ```
+
+---
+
+### 1.4 Path coverage and exceptional flows
+
+**What this measures:** COMPLETENESS of execution paths
+**Assumes:** Individual paths work correctly (that's 1.1-1.3)
+**Focus:** Are all source paths present? Are error cases handled? Are there invented paths that don't exist in source?
+
+- **Evaluation Choices:**
+    - **1:** All important paths in source (normal, error, early exit, retry, timeout, cleanup) are visibly represented. No paths are missing or invented.
+    - **0:** All major paths are present but some are awkwardly merged or less clearly distinguished (e.g., multiple error codes collapsed to one generic error). Analyst can still see all outcomes occur.
+    - **-1:** One or more meaningful paths are missing, incorrectly merged, or newly invented (e.g., error path turned into success, cleanup never executed on some paths, unreachable code that doesn't exist in source). Analyst would misjudge reachable behaviors.
+
+- **Example:**
+    - **Source code:**
+        ```c
+        // Three distinct return codes for three error conditions
+        int parse_request(uint8_t *buf, size_t len) {
+            if (len < 4) return -1;           // too short
+            if (buf[0] != 0x02) return -2;    // wrong magic
+            if (buf[1] > MAX_VERSION) return -3;  // unsupported version
+            // ... normal processing ...
+            return 0;  // success
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        int parse_request(uint8_t *buf, size_t len) {
+            if (len < 4) return -1;
+            if (buf[0] != 0x02) return -2;
+            if (buf[1] > MAX_VERSION) return -3;
+            // ... normal processing ...
+            return 0;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // All paths present but error codes merged
+        // Analyst loses distinction between error types
+        int parse_request(uint8_t *buf, size_t len) {
+            if (len < 4) return -1;
+            if (buf[0] != 0x02) return -1;       // merged -2 → -1
+            if (buf[1] > MAX_VERSION) return -1; // merged -3 → -1
+            // ... normal processing ...
+            return 0;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // MISSING: the version check path is completely gone!
+        int parse_request(uint8_t *buf, size_t len) {
+            if (len < 4) return -1;
+            if (buf[0] != 0x02) return -2;
+            // BUG: missing version check - accepts invalid versions
+            // ... normal processing ...
+            return 0;
+        }
+        ```
+
+---
+
+## **2. Type and Data Structure Similarity**
+
+### 2.1 Primitive type semantics (width, signedness, enums, bool)
+
+**What this measures:** Correctness of atomic types
+**Focus:** Are primitive types semantically correct? (int vs uint, 16 vs 32-bit, bool vs int, enum vs raw int)
+
+- **Evaluation Choices:**
+    - **1:** Primitive types match source in width and signedness. Booleans and enums are preserved as such (bool, enum state) instead of raw ints.
+    - **0:** Uses more generic types that preserve behavior on typical platforms (int for uint32_t, unsigned long for size_t). Enums collapsed to ints but used consistently. Semantics are inferable.
+    - **-1:** Types are mismatched in ways that change or obscure semantics (signed vs unsigned affecting comparisons/overflow, wrong bit width affecting ranges, booleans as magic integers, enums as arbitrary ints with conflicting values).
+
+- **Example:**
+    - **Source code:**
+        ```c
+        #include <stdbool.h>
+        #include <stdint.h>
+
+        bool is_authorized(uint32_t user_flags) {
+            return (user_flags & AUTH_FLAG) != 0;
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        #include <stdbool.h>
+        #include <stdint.h>
+
+        bool is_authorized(uint32_t user_flags) {
+            return (user_flags & AUTH_FLAG) != 0;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Generic unsigned type, returns 0/1 as int
+        // Behavior preserved but less precise
+        unsigned int is_authorized(unsigned int user_flags) {
+            return (user_flags & AUTH_FLAG) != 0;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // WRONG: signed int changes overflow/comparison semantics
+        // Returns mask value instead of boolean
+        int is_authorized(int user_flags) {
+            return (user_flags & AUTH_FLAG);  // returns 0x1000, not 0/1
+        }
+        ```
+
+---
+
+### 2.2 Struct layout and field roles
+
+**What this measures:** Organization of composite types
+**Focus:** Do struct/union definitions have the right fields with the right roles?
+
+- **Evaluation Choices:**
+    - **1:** Struct/union definitions match source closely: same fields, similar ordering, clear naming that reflects roles. No invented or merged fields that hide meaning.
+    - **0:** Structs exist with correct memory layout but some fields are generic or partially collapsed (e.g., header bytes as array instead of separate type/flags fields). Analyst can reconstruct roles from usage.
+    - **-1:** Struct layout doesn't match semantically: fields merged/split incorrectly, critical fields missing, wrong types/offsets. Code suggests a data model that doesn't exist, making field roles impossible to map.
+
+- **Example:**
+    - **Source code:**
+        ```c
+        struct packet {
+            uint8_t  type;
+            uint8_t  flags;
+            uint16_t length;
+            uint8_t  payload[256];
+        };
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        struct packet {
+            uint8_t  type;
+            uint8_t  flags;
+            uint16_t length;
+            uint8_t  payload[256];
+        };
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Semantically equivalent but generic names
+        // type+flags packed into array
+        struct packet {
+            unsigned char header[2];  // type, flags
+            unsigned short size;      // length
+            unsigned char data[256];  // payload
+        };
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // WRONG: merges type+flags, wrong size for length and payload
+        struct packet {
+            uint16_t header;       // BUG: merges type and flags
+            uint32_t length;       // BUG: 32-bit instead of 16-bit
+            uint8_t  payload[128]; // BUG: wrong size
+        };
+        ```
+
+---
+
+### 2.3 Pointer / reference and indirection modeling
+
+**What this measures:** Levels of indirection
+**Focus:** Are pointers, references, and indirection levels correct?
+
+- **Evaluation Choices:**
+    - **1:** Correctly distinguishes pointers, arrays, and values. Uses pointers where source does, respects indirection levels (T vs T* vs T**), and models ownership/reference correctly.
+    - **0:** Uses extra temporaries or awkward indirection (pointer-to-pointer API where original returned pointer, array indexes as pointer arithmetic). Still accesses same objects in same way.
+    - **-1:** Misrepresents indirection in a way that changes relationships (treating T* as T**, treating pointer to single object as array, embedded struct as heap pointer or vice versa). Causes misunderstanding about aliasing, sharing, or which object is modified.
+
+- **Example:**
+    - **Source code:**
+        ```c
+        struct node {
+            int value;
+            struct node *next;  // pointer to next node
+        };
+
+        struct node *prepend(struct node *head, int value) {
+            struct node *n = malloc(sizeof(struct node));
+            if (!n) return head;
+            n->value = value;
+            n->next = head;
+            return n;
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        struct node {
+            int value;
+            struct node *next;
+        };
+
+        struct node *prepend(struct node *head, int value) {
+            struct node *n = malloc(sizeof(struct node));
+            if (!n) return head;
+            n->value = value;
+            n->next = head;
+            return n;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Different API (pointer-to-pointer) but same linked list model
+        struct node {
+            int value;
+            struct node *next;
+        };
+
+        void prepend(struct node **head, int value) {
+            struct node *n = malloc(sizeof(struct node));
+            if (!n) return;
+            n->value = value;
+            n->next = *head;
+            *head = n;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // WRONG: embedded struct instead of pointer
+        // Implies value copying, not pointer linking
+        struct node {
+            int value;
+            struct node next;  // BUG: embedded struct, not pointer!
+        };
+
+        struct node *prepend(struct node *head, int value) {
+            struct node *n = malloc(sizeof(struct node));
+            if (!n) return head;
+            n->value = value;
+            if (head) {
+                n->next = *head;  // BUG: struct copy, not pointer link
+            }
+            return n;
+        }
+        ```
+
+---
+
+### 2.4 Collections / buffers / strings representation
+
+**What this measures:** How aggregations and sequences are modeled
+**Focus:** Are collections, buffers, and strings represented correctly?
+
+- **Evaluation Choices:**
+    - **1:** Correctly exposes same structures as source: arrays vs lists vs maps, buffer+length pairs, null-terminated strings vs raw bytes. Length fields, capacities, terminators modeled explicitly.
+    - **0:** Semantically equivalent but generic (fixed array as data[256] instead of data[BUF_CAPACITY], unsigned int for length instead of size_t). Logic around bounds and termination preserved.
+    - **-1:** Misrepresents collection semantics: loses/invents length/termination; treats bounded as unbounded (or vice versa); eliminates key boundaries making buffer overflows or iteration non-understandable.
+
+- **Example:**
+    - **Source code:**
+        ```c
+        #define BUF_CAPACITY 256
+
+        struct buf {
+            uint8_t data[BUF_CAPACITY];  // fixed-size array
+            size_t  len;                 // current length (0 <= len <= 256)
+        };
+
+        int buf_append(struct buf *b, uint8_t byte) {
+            if (b->len >= BUF_CAPACITY) return -1;
+            b->data[b->len++] = byte;
+            return 0;
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        struct buf {
+            uint8_t data[BUF_CAPACITY];
+            size_t  len;
+        };
+
+        int buf_append(struct buf *b, uint8_t byte) {
+            if (b->len >= BUF_CAPACITY) return -1;
+            b->data[b->len++] = byte;
+            return 0;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Hardcoded 256, unsigned int instead of size_t
+        // Still clearly fixed-size buffer with bounds checking
+        struct buf {
+            unsigned char data[256];
+            unsigned int  len;
+        };
+
+        int buf_append(struct buf *b, unsigned char byte) {
+            if (b->len >= 256) return -1;
+            b->data[b->len++] = byte;
+            return 0;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // WRONG: models as dynamically reallocating buffer
+        // Completely different data structure and invariants
+        struct buf {
+            unsigned char *data;  // BUG: pointer, not fixed array
+            unsigned int   len;   // BUG: used as capacity, not current length
+        };
+
+        int buf_append(struct buf *b, unsigned char byte) {
+            unsigned int new_size = b->len + 1;
+            unsigned char *tmp = realloc(b->data, new_size);
+            if (!tmp) return -1;
+            b->data = tmp;
+            b->data[b->len] = byte;
+            b->len = new_size;
+            return 0;
+        }
+        ```
+
+---
+
+## **3. Identifier Semantic Similarity**
+
+### 3.1 Function name meaning
+
+**What this measures:** Does the function name describe its PRIMARY PURPOSE?
+**Scope:** Function identifiers only
+**Focus:** Is the function's high-level role in the system clear from its name?
+
+- **Evaluation Choices:**
+    - **1:** Function name describes the true purpose using domain terms and expected intent. Clear what the function does at a high level.
+    - **0:** Name is generic or neutral (process_data, handle_request, do_operation). Not misleading but lacks insight. Analyst can infer intent from implementation.
+    - **-1:** Name is misleading or conflicts with actual purpose (function that verifies is named "encrypt", function that parses is named "send"). Analyst would misunderstand the function's role.
+
+- **Example:**
+    - **Source code:**
+        ```c
+        int verify_password(const char *user, const char *password) {
+            uint8_t stored_hash[32];
+            uint8_t input_hash[32];
+
+            if (load_user_hash(user, stored_hash) != 0) return 0;
+            hash_password(password, input_hash);
+            return memcmp(stored_hash, input_hash, 32) == 0;
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        // Clear purpose: password verification
+        int verify_password(const char *user, const char *password) {
+            uint8_t stored_hash[32];
+            uint8_t input_hash[32];
+
+            if (load_user_hash(user, stored_hash) != 0) return 0;
+            hash_password(password, input_hash);
+            return memcmp(stored_hash, input_hash, 32) == 0;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Generic name, not helpful but not wrong
+        int check_user(const char *user, const char *password) {
+            uint8_t stored_hash[32];
+            uint8_t input_hash[32];
+
+            if (load_user_hash(user, stored_hash) != 0) return 0;
+            hash_password(password, input_hash);
+            return memcmp(stored_hash, input_hash, 32) == 0;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // MISLEADING: suggests encryption, not verification
+        int encrypt_user_credential(const char *user, const char *password) {
+            uint8_t stored_hash[32];
+            uint8_t input_hash[32];
+
+            if (load_user_hash(user, stored_hash) != 0) return 0;
+            hash_password(password, input_hash);
+            return memcmp(stored_hash, input_hash, 32) == 0;
+        }
+        ```
+
+---
+
+### 3.2 Variable and parameter role clarity
+
+**What this measures:** Do variable/parameter names describe their SEMANTIC ROLE?
+**Scope:** Local variables, parameters, loop counters
+**Focus:** Can you understand what data each variable represents?
+
+- **Evaluation Choices:**
+    - **1:** Variable and parameter names are specific and match semantic roles. Analyst can understand what each tracks or stores. Units, encoding, or domain roles sometimes reflected.
+    - **0:** Generic names (x, y, buf, n, i) but not conflicting with true role. Some effort needed to infer meaning but nothing misleading.
+    - **-1:** Names are misleading or swapped with unrelated semantics (payload offset called checksum, protocol version called user_id). Strong risk of misinterpretation.
+
+- **Example:**
+    - **Source code:**
+        ```c
+        int parse_header(const uint8_t *buf, size_t buf_len) {
+            uint16_t version = (buf[0] << 8) | buf[1];
+            uint16_t msg_type = (buf[2] << 8) | buf[3];
+            uint16_t payload_len = (buf[4] << 8) | buf[5];
+
+            if (version != 1 || msg_type == 0) return -1;
+            return (int)payload_len;
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        // Clear variable roles
+        int parse_header(const uint8_t *buffer, size_t buffer_len) {
+            uint16_t version = (buffer[0] << 8) | buffer[1];
+            uint16_t message_type = (buffer[2] << 8) | buffer[3];
+            uint16_t payload_length = (buffer[4] << 8) | buffer[5];
+
+            if (version != 1 || message_type == 0) return -1;
+            return (int)payload_length;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Generic names, not helpful but not wrong
+        int parse_header(const uint8_t *b, size_t n) {
+            uint16_t x = (b[0] << 8) | b[1];
+            uint16_t y = (b[2] << 8) | b[3];
+            uint16_t z = (b[4] << 8) | b[5];
+
+            if (x != 1 || y == 0) return -1;
+            return (int)z;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // MISLEADING: variable names conflict with real purpose
+        int parse_header(const uint8_t *payload, size_t payload_count) {
+            uint16_t payload_len = (payload[0] << 8) | payload[1];  // WRONG: actually version
+            uint16_t user_id = (payload[2] << 8) | payload[3];      // WRONG: actually msg_type
+            uint16_t checksum = (payload[4] << 8) | payload[5];     // WRONG: actually payload_len
+
+            if (payload_len != 1 || user_id == 0) return -1;
+            return (int)checksum;
+        }
+        ```
+
+---
+
+### 3.3 Struct / type / field semantic labeling
+
+**What this measures:** Do type and field names describe the DATA MODEL?
+**Scope:** Type names, struct names, field names, enum names
+**Focus:** Does the type system vocabulary match the problem domain?
+
+- **Evaluation Choices:**
+    - **1:** Type and field names match conceptual purpose and domain. No spurious domain terms, no fields repurposed with wrong names.
+    - **0:** Names are generic or neutral (id, counter, flag, ts) but not deceptive. Analyst infers precise meaning from context.
+    - **-1:** Names actively mislead by using domain-inconsistent, swapped, or unrelated concepts (user ID as ip_address, timestamp as file_size, admin flag as has_2fa).
+
+- **Example:**
+    - **Source code:**
+        ```c
+        struct session {
+            uint32_t user_id;
+            uint64_t last_seen_ts;   // UNIX timestamp
+            uint8_t  is_admin;       // 0 or 1
+            uint32_t failed_logins;
+        };
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        // Type/fields match domain semantics
+        struct session {
+            uint32_t user_id;
+            uint64_t last_seen_timestamp;
+            uint8_t  is_admin;
+            uint32_t failed_login_count;
+        };
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Generic names, clear enough
+        struct session {
+            uint32_t id;
+            uint64_t ts;
+            uint8_t  flag;
+            uint32_t counter;
+        };
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // MISLEADING: completely different domain concepts
+        struct connection_info {
+            uint32_t ip_address;     // WRONG: actually user_id
+            uint64_t file_size;      // WRONG: actually timestamp
+            uint8_t  has_2fa;        // WRONG: actually is_admin
+            uint32_t packet_length;  // WRONG: actually failed_logins
+        };
+        ```
+
+---
+
+### 3.4 Naming consistency & decompiler artifact elimination
+
+**What this measures:** PROFESSIONALISM of naming
+**Scope:** All identifiers, holistically
+**Focus:** Consistent conventions? Absence of tool artifacts (sub_401000, v1, a2)?
+
+- **Evaluation Choices:**
+    - **1:** Names are consistent and form coherent story across code (always "count", "buf", "user_id"). No binary artifacts, decompiler defaults, or uninformative names.
+    - **0:** Internally consistent but generic (buf/n/i/cnt everywhere). May hint at automated renaming but doesn't impede analysis. No contradictory patterns.
+    - **-1:** Names are artifacts of binary/decompiler (v11, sub_401000, a1) or random inconsistent patterns. When prevalent, forces extra analyst work and impedes understanding.
+
+- **Example:**
+    - **Source code:**
+        ```c
+        int count_valid_packets(struct packet *packets, int count) {
+            int valid = 0;
+            for (int i = 0; i < count; i++) {
+                if (packets[i].is_valid) {
+                    valid++;
+                }
+            }
+            return valid;
+        }
+        ```
+    - **Decompiled code graded 1:**
+        ```c
+        // Consistent, professional naming
+        int count_valid_packets(struct packet *packets, int count) {
+            int valid = 0;
+            for (int i = 0; i < count; i++) {
+                if (packets[i].is_valid) {
+                    valid++;
+                }
+            }
+            return valid;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Generic but internally consistent
+        int count_valid_packets(struct packet *pkts, int cnt) {
+            int n = 0;
+            for (int i = 0; i < cnt; i++) {
+                if (pkts[i].is_valid) {
+                    n++;
+                }
+            }
+            return n;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // Decompiler artifacts and inconsistent patterns
+        int count_valid_packets(struct packet *a1, int a2) {
+            int v3 = 0;
+            for (int v4 = 0; v4 < a2; v4++) {
+                if (a1[v4].is_valid) {
+                    v3++;
+                }
+            }
+            return v3;
+        }
+
+        // Or inconsistent human naming:
+        int count_valid_packets(struct packet *pkts, int totalCnt) {
+            int numValid = 0;  // camelCase suddenly
+            for (int idx = 0; idx < totalCnt; idx++) {
+                if (pkts[idx].is_valid) {
+                    numValid++;
+                }
+            }
+            return numValid;
+        }
+        ```
+
+---
+
+## **4. Overall Readability and Organization**
+
+### 4.1 Formatting, indentation & visual scanability
+
+**What this measures:** VISUAL PRESENTATION
+**Focus:** Can you visually parse where blocks begin/end? Is indentation consistent?
+
+- **Evaluation Choices:**
+    - **1:** Clean, consistent formatting and indentation. Block structure clear and easy to parse. Blank lines, brace style, indentation match idiomatic C.
+    - **0:** Minor inconsistencies or cramped lines but still readable. Some awkward spacing/alignment but logic and grouping apparent.
+    - **-1:** Indentation, line breaks, or spacing make code hard to parse (logic jammed on one line, odd wraps, inconsistent indentation). Grouping/structure difficult to recognize at a glance.
+
+- **Example:**
+    - **Decompiled code graded 1:**
+        ```c
+        int count_matches(const uint8_t *buf, size_t len, uint8_t needle) {
+            size_t i;
+            int count = 0;
+
+            for (i = 0; i < len; i++) {
+                if (buf[i] == needle) {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        int count_matches(const uint8_t *buf, size_t len, uint8_t needle)
+        {
+          size_t i; int count = 0;  // cramped declaration
+          for (i = 0; i < len; i++)
+          {
+              if (buf[i] == needle)
+              {
+                count++;
+              }
+          }
+         return count;  // slight misalignment
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        int count_matches(const uint8_t *buf,size_t len,uint8_t needle){size_t
+        i;int count=0;for(i=0;i<len;i++){if(buf[i]==needle){count++;}}return
+        count;}
+        ```
+
+---
+
+### 4.2 Logical grouping & decomposition into helpers
+
+**What this measures:** FUNCTIONAL ORGANIZATION
+**Focus:** Can you identify distinct phases and responsibilities?
+
+- **Evaluation Choices:**
+    - **1:** Code organized into visually/functionally distinct groups or helpers. Comments and whitespace segment phases. Each phase recognizable and minimal.
+    - **0:** All phases present in linear, clear-by-sequence block but no explicit visual or helper separation. Readable but structure not highlighted.
+    - **-1:** Logic for different phases jumbled, highly interleaved, or deeply nested so boundaries obscured. Analyst must untangle what belongs to parsing vs verification vs other stages.
+
+- **Example:**
+    - **Decompiled code graded 1:**
+        ```c
+        int handle_packet(struct ctx *c, const uint8_t *buf, size_t len) {
+            // Basic length check
+            if (len < HEADER_SIZE) {
+                return -1;
+            }
+
+            // Phase 1: Parse header
+            if (parse_header(&c->hdr, buf) < 0) {
+                return -1;
+            }
+
+            // Phase 2: Parse payload
+            const uint8_t *payload = buf + HEADER_SIZE;
+            size_t payload_len = len - HEADER_SIZE;
+            if (parse_payload(&c->payload, payload, payload_len) < 0) {
+                return -1;
+            }
+
+            // Phase 3: Verify checksum
+            if (!verify_checksum(&c->hdr, &c->payload)) {
+                return -1;
+            }
+
+            return 0;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Linear, no comments, no spacing, but sequence is clear
+        int handle_packet(struct ctx *c, const uint8_t *buf, size_t len) {
+            if (len < HEADER_SIZE) return -1;
+            if (parse_header(&c->hdr, buf) < 0) return -1;
+            const uint8_t *payload = buf + HEADER_SIZE;
+            size_t payload_len = len - HEADER_SIZE;
+            if (parse_payload(&c->payload, payload, payload_len) < 0) return -1;
+            if (!verify_checksum(&c->hdr, &c->payload)) return -1;
+            return 0;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // Phases jumbled: checksum before payload, validation interleaved
+        int handle_packet(struct ctx *c, const uint8_t *buf, size_t len) {
+            int rc = 0;
+
+            if (len >= HEADER_SIZE) {
+                const uint8_t *payload = buf + HEADER_SIZE;
+                size_t payload_len = len - HEADER_SIZE;
+
+                if (parse_header(&c->hdr, buf) < 0) {
+                    rc = -1;
+                } else {
+                    // Checksum before payload parsing (wrong phase order)
+                    if (!verify_checksum(&c->hdr, &c->payload)) {
+                        rc = -1;
+                    } else {
+                        if (parse_payload(&c->payload, payload, payload_len) < 0) {
+                            rc = -1;
+                        }
+                    }
+                }
+            } else {
+                rc = -1;
+            }
+
+            return rc;
+        }
+        ```
+
+---
+
+### 4.3 Usefulness and precision of comments / annotations
+
+**What this measures:** COMMENT QUALITY
+**Focus:** Do comments add value beyond re-stating code?
+
+- **Evaluation Choices:**
+    - **1:** Comments are concise, accurate, add value beyond code. Clarify intent, subtlety, or domain property. Avoid misleading/wrong information.
+    - **0:** Comments present but low-value or redundant (restating structure or trivial code). Not harmful but provide little insight.
+    - **-1:** Comments are wrong, misleading, or contradictory (claiming XOR is AES, "cannot be reversed"). May waste analyst time or create risk.
+
+- **Example:**
+    - **Decompiled code graded 1:**
+        ```c
+        // Apply XOR transformation over buffer.
+        // Symmetric: calling twice with same key restores original data.
+        void xor_obfuscate(uint8_t *buf, size_t len, uint8_t key) {
+            for (size_t i = 0; i < len; i++) {
+                buf[i] ^= key;
+            }
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // XOR function
+        void xor_obfuscate(uint8_t *buf, size_t len, uint8_t key) {
+            // loop from 0 to len - 1
+            for (size_t i = 0; i < len; i++) {
+                // buf[i] = buf[i] ^ key
+                buf[i] ^= key;
+                // end of iteration
+            }
+            // done
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // WARNING: cryptographically secure AES-256 encryption
+        void xor_obfuscate(uint8_t *buf, size_t len, uint8_t key) {
+            // TODO: might be RSA???
+            for (size_t i = 0; i < len; i++) {
+                // decrypt using key (probably)
+                buf[i] ^= key;  // not sure what this does
+            }
+            // extremely secure, cannot be reversed
+        }
+        ```
+
+---
+
+### 4.4 Noise reduction & decompiler artifact cleanup
+
+**What this measures:** SIGNAL-TO-NOISE RATIO
+**Focus:** How much mental filtering is needed to see real logic?
+
+- **Evaluation Choices:**
+    - **1:** Free of decompiler noise: no unused variables, dead code, extra labels/gotos, leftover debug. Reads like hand-written C.
+    - **0:** Some low-level artifacts remain (unnecessary temps, awkward control, superfluous variables) but real logic visible. Analyst can mentally filter noise.
+    - **-1:** Cluttered with decompiler leftovers: useless variables, unreachable branches, label/goto soup, debug prints, dead logic. Core idea hard to see; analyst must strip out debris.
+
+- **Example:**
+    - **Decompiled code graded 1:**
+        ```c
+        uint32_t checksum32(const uint8_t *buf, size_t len) {
+            uint32_t sum = 0;
+            for (size_t i = 0; i < len; i++) {
+                sum += buf[i];
+            }
+            return sum;
+        }
+        ```
+    - **Decompiled code graded 0:**
+        ```c
+        // Extra temp, manual while loop, but logic is clear
+        uint32_t checksum32(const uint8_t *buf, size_t len) {
+            uint32_t sum = 0;
+            size_t i = 0;
+            uint8_t b;
+
+            while (i < len) {
+                b = buf[i];
+                sum = sum + b;
+                i = i + 1;
+            }
+
+            return sum;
+        }
+        ```
+    - **Decompiled code graded -1:**
+        ```c
+        // Flooded with artifacts and dead code
+        uint32_t checksum32(const uint8_t *buf, size_t len) {
+            uint32_t sum = 0;
+            uint32_t tmp1 = 0;
+            uint32_t tmp2 = 0;
+            uint32_t debug_val = 0;
+            uint32_t unused = 0;
+            int flag = 0;
+            int bogus_counter = 0;
+            size_t i = 0;
+
+            // Dead code
+            if (0) {
+                for (bogus_counter = 0; bogus_counter < 1000; bogus_counter++) {
+                    debug_val += bogus_counter;
+                }
+            }
+
+        loop_start:
+            if (i >= len) {
+                goto done;
+            }
+
+            tmp1 = buf[i];
+            tmp2 = tmp1;
+            sum = sum + tmp2;
+            unused = sum ^ 0;
+            flag = 1;
+            i = i + 1;
+            goto loop_start;
+
+        done:
+            return sum;
+        }
+        ```
+
+---
+
+## **Evaluation Output Format**
+
+After completing your evaluation, you MUST save your scores to `/workspace/evaluation.json` in the following JSON format:
+
+```json
+{
+  "structural_semantic_similarity": {
+    "high_level_control_flow": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "branch_loop_conditions": {
+      "score": 0,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "data_flow_state_transitions": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "path_coverage_exceptional_flows": {
+      "score": -1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    }
+  },
+  "type_data_structure_similarity": {
+    "primitive_type_semantics": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "struct_layout_field_roles": {
+      "score": 0,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "pointer_reference_indirection": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "collections_buffers_strings": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    }
+  },
+  "identifier_semantic_similarity": {
+    "function_name_meaning": {
+      "score": 0,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "variable_parameter_clarity": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "struct_type_field_labeling": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "naming_consistency_artifact_elimination": {
+      "score": -1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    }
+  },
+  "overall_readability_organization": {
+    "formatting_indentation_scanability": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "logical_grouping_decomposition": {
+      "score": 0,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "comments_annotations_usefulness": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    },
+    "noise_reduction_artifact_cleanup": {
+      "score": 1,
+      "reasoning": "Brief explanation referencing specific examples from the pseudocode"
+    }
+  },
+  "summary": {
+    "overall_assessment": "Brief 2-3 sentence summary of the pseudocode quality, highlighting strengths and weaknesses"
+  }
+}
+```
