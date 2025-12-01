@@ -97,7 +97,7 @@ class OpenhandsArgs:
     llm: LLMArgs
     """LLM arguments"""
 
-    max_iter: int = 100
+    max_iter: int = 500
     """Maximum number of iterations to run the agent"""
 
     repo: Path = SCRIPT_DIR / "openhands-repo"
@@ -109,8 +109,8 @@ class OpenhandsArgs:
     remove_tmp: bool = True
     """If true, remove the tmp directory after running the agent"""
 
-    timeout: int = 1200
-    """Timeout for the OpenHands agent in seconds. Default is 20 minutes."""
+    timeout: int = 2700
+    """Timeout for the OpenHands agent in seconds. Default is 45 minutes."""
 
     debug: bool = flag(default=False)
     """If true, enable debug mode for the OpenHands agent"""
@@ -132,6 +132,9 @@ class TaskArgs:
 
     evaluation_mode: str = "exploit"
     """Evaluation mode: exploit (PoC), reverse_engineering (RE pseudocode), or judge (evaluate RE submission)"""
+
+    rubric: str = "five-point"
+    """Rubric to use for RE evaluation: five-point, granular"""
 
     run_dir: Path | None = None
     """Path to run directory for judge mode (e.g., cybergym_eval_6/arvo_3938/logs/run_0/arvo_3938-xxx)"""
@@ -183,14 +186,14 @@ def get_api_key(model: str):
 
 def get_prompt_file(model: str, evaluation_mode: str = "exploit"):
     if evaluation_mode == "reverse_engineering":
-        return "prompt.reverse.txt"
+        return "prompt.reverse.md"
     elif evaluation_mode == "judge":
-        return "prompt.judge.txt"
+        return "prompt.judge.md"
     elif evaluation_mode == "ctf":
-        return "prompt.flareon.txt"
+        return "prompt.ctf.md"
     # if "o4-mini" in model or "o3-" in model:
-    #     return "prompt.o4-mini.txt"
-    return "prompt.exploit.txt"
+    #     return "prompt.o4-mini.md"
+    return "prompt.exploit.md"
 
 
 def support_native_tool_calling(model: str):
@@ -388,7 +391,7 @@ def trigger_judge_evaluation(task_args: TaskArgs, agent_id: str, log_dir: Path) 
     try:
         result = subprocess.run(
             cmd,
-            timeout=600,  # 10 minutes timeout
+            timeout=1800,  # 30 minutes timeout
             check=False,  # Don't raise on non-zero exit
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -510,7 +513,7 @@ def extract_judge_info_from_run_dir(run_dir: Path, db_path: Path | None = None) 
     return task_id, agent_id, pseudocode, tarball_path
 
 
-def prepare_judge_workspace(workspace_dir: Path, task_id: str, tarball_path: Path, pseudocode: str):
+def prepare_judge_workspace(workspace_dir: Path, task_id: str, tarball_path: Path, pseudocode: str, rubric: str = "five-point"):
     """Prepare workspace for judge mode with tarball and pseudocode."""
     import json
 
@@ -535,10 +538,21 @@ def prepare_judge_workspace(workspace_dir: Path, task_id: str, tarball_path: Pat
     with open(workspace_dir / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
+    # Copy ghidra manual and rubric for judge
+    from cybergym.task.arvo_task import SCRIPT_DIR as TASK_SCRIPT_DIR
+    from cybergym.task.types import RUBRICS
+    ghidra_manual = TASK_SCRIPT_DIR / "ghidra_manual.md"
+    if ghidra_manual.exists():
+        shutil.copy(ghidra_manual, workspace_dir / "ghidra_manual.md")
+    rubric_file = RUBRICS.get(rubric, RUBRICS["five-point"])[0]
+    rubric_path = TASK_SCRIPT_DIR / rubric_file
+    if rubric_path.exists():
+        shutil.copy(rubric_path, workspace_dir / "rubric.md")
+
     logger.info(f"Judge workspace prepared at {workspace_dir}")
 
 
-def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_pseudocode: str = None, judge_tarball: Path = None, eval_paths=None, run_number: int = 0):
+def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_pseudocode: str = None, judge_tarball: Path = None, eval_paths=None, run_number: int = 0, judge_number: int = 0):
     openhands_args.log_dir.mkdir(parents=True, exist_ok=True)
     openhands_args.log_dir = openhands_args.log_dir.absolute()
 
@@ -577,7 +591,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
         # Judge mode: prepare workspace with pseudocode and tarball
         if not judge_pseudocode or not judge_tarball:
             raise ValueError("judge_pseudocode and judge_tarball are required for judge mode")
-        prepare_judge_workspace(task_dir, task_args.task_id, judge_tarball, judge_pseudocode)
+        prepare_judge_workspace(task_dir, task_args.task_id, judge_tarball, judge_pseudocode, task_args.rubric)
         task = {"task_id": task_args.task_id, "mode": "judge"}
     else:
         # Normal mode: generate task
@@ -589,6 +603,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
             difficulty=task_args.difficulty,
             agent_id=agent_id,
             evaluation_mode=task_args.evaluation_mode,
+            rubric=task_args.rubric,
         )
         task = generate_task(task_config)
 
@@ -633,6 +648,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
     config["core"]["cache_dir"] = str(cache_dir.resolve())
     config["core"]["file_store_path"] = str(file_dir.resolve())
     config["core"]["save_trajectory_path"] = str(trajectory_dir.resolve())
+    config["core"]["runtime"] = os.getenv("OPENHANDS_RUNTIME", "docker")
     config["llm"]["model"] = model_map(openhands_args.llm.model)
     config["llm"]["top_p"] = openhands_args.llm.top_p
     config["llm"]["temperature"] = openhands_args.llm.temperature
@@ -645,6 +661,11 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
 
     if openhands_args.llm.seed is not None:
         config["llm"]["seed"] = openhands_args.llm.seed
+
+    # Set longer timeout for long-running commands (e.g., Ghidra) inside the container
+    if "sandbox" not in config:
+        config["sandbox"] = {}
+    config["sandbox"]["runtime_startup_env_vars"] = {"NO_CHANGE_TIMEOUT_SECONDS": "60"}
 
     with open(config_path, "w") as f:
         f.write(tomli_w.dumps(config))
@@ -680,13 +701,24 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
 
     # 5.5. Copy evaluation.json from workspace to log_dir if in judge mode
     if task_args.evaluation_mode == "judge":
-        evaluation_src = task_dir / "evaluation.json"
         evaluation_dst = log_dir / "evaluation.json"
-        if evaluation_src.exists():
+        # Check both paths: Modal runtime creates nested workspace dir (/workspace/workspace/)
+        evaluation_candidates = [
+            task_dir / "outputs" / "evaluation.json",  # New: dedicated outputs directory
+            task_dir / "evaluation.json",
+            task_dir / "workspace" / "evaluation.json",  # Modal nested workspace (fallback)
+        ]
+        evaluation_src = None
+        for candidate in evaluation_candidates:
+            if candidate.exists():
+                evaluation_src = candidate
+                break
+
+        if evaluation_src:
             shutil.copy2(evaluation_src, evaluation_dst)
-            logger.info(f"Copied evaluation.json from workspace to {evaluation_dst}")
+            logger.info(f"Copied evaluation.json from {evaluation_src} to {evaluation_dst}")
         else:
-            logger.warning(f"evaluation.json not found in workspace at {evaluation_src}")
+            logger.warning(f"evaluation.json not found in workspace at {evaluation_candidates}")
 
     # 6. remove the tmp directory or save to debug if keep_tmp
     if openhands_args.remove_tmp:

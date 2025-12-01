@@ -167,6 +167,8 @@ class ActionExecutionClient(Runtime):
                 params=params,
                 timeout=30,
             ) as response:
+                # Check if request was successful before processing response
+                response.raise_for_status()
                 with tempfile.NamedTemporaryFile(
                     suffix='.zip', delete=False
                 ) as temp_file:

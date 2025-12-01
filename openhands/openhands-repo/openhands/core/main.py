@@ -203,6 +203,9 @@ async def run_controller(
 
     await controller.close(set_stop_state=False)
 
+    # Close runtime before asyncio.run() exits (atexit is too late - executor dead by then)
+    runtime.close()
+
     state = controller.get_state()
 
     # save trajectories if applicable

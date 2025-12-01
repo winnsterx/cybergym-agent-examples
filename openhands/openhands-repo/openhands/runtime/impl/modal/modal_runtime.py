@@ -2,6 +2,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Callable
+from zipfile import ZipFile
 
 import httpx
 import modal
@@ -60,20 +61,21 @@ class ModalRuntime(ActionExecutionClient):
         self.sandbox = None
         self.sid = sid
 
-        self.modal_client = modal.Client.from_credentials(
-            config.modal_api_token_id.get_secret_value(),
-            config.modal_api_token_secret.get_secret_value(),
-        )
+        # Handle both SecretStr and plain string values
+        token_id = config.modal_api_token_id
+        token_secret = config.modal_api_token_secret
+        if hasattr(token_id, 'get_secret_value'):
+            token_id = token_id.get_secret_value()
+        if hasattr(token_secret, 'get_secret_value'):
+            token_secret = token_secret.get_secret_value()
+
+        self.modal_client = modal.Client.from_credentials(token_id, token_secret)
         self.app = modal.App.lookup(
             'openhands', create_if_missing=True, client=self.modal_client
         )
 
-        # workspace_base cannot be used because we can't bind mount into a sandbox.
-        if self.config.workspace_base is not None:
-            self.log(
-                'warning',
-                'Setting workspace_base is not supported in the modal runtime.',
-            )
+        # Store workspace_base for file staging (copy to/from sandbox on connect/close)
+        self._workspace_base = Path(self.config.workspace_base) if self.config.workspace_base else None
 
         # This value is arbitrary as it's private to the container
         self.container_port = 3000
@@ -140,6 +142,13 @@ class ModalRuntime(ActionExecutionClient):
             self.send_status_message('STATUS$WAITING_FOR_CLIENT')
 
         self._wait_until_alive()
+
+        # Copy workspace files to sandbox if workspace_base is set
+        if self._workspace_base and self._workspace_base.exists() and self._workspace_base.is_dir():
+            sandbox_workspace = self.config.workspace_mount_path_in_sandbox
+            self.log('info', f'Copying workspace files from {self._workspace_base} to {sandbox_workspace}')
+            self.copy_to(str(self._workspace_base), sandbox_workspace, recursive=True)
+
         self.setup_initial_env()
 
         if not self.attach_to_existing:
@@ -150,8 +159,8 @@ class ModalRuntime(ActionExecutionClient):
         return self.api_url
 
     @tenacity.retry(
-        stop=tenacity.stop_after_delay(120) | stop_if_should_exit(),
-        retry=tenacity.retry_if_exception_type((ConnectionError, httpx.NetworkError)),
+        stop=tenacity.stop_after_delay(300) | stop_if_should_exit(),
+        retry=tenacity.retry_if_exception_type((ConnectionError, httpx.NetworkError, httpx.TimeoutException)),
         reraise=True,
         wait=tenacity.wait_fixed(2),
     )
@@ -165,7 +174,17 @@ class ModalRuntime(ActionExecutionClient):
         runtime_extra_deps: str | None,
     ) -> modal.Image:
         if runtime_container_image_id:
-            base_runtime_image = modal.Image.from_registry(runtime_container_image_id)
+            # Check if it's a GCP Artifact Registry image
+            if "pkg.dev" in runtime_container_image_id:
+                base_runtime_image = modal.Image.from_gcp_artifact_registry(
+                    runtime_container_image_id,
+                    secret=modal.Secret.from_name(
+                        "claude-reversing-registry-reader",
+                        required_keys=["SERVICE_ACCOUNT_JSON"],
+                    ),
+                )
+            else:
+                base_runtime_image = modal.Image.from_registry(runtime_container_image_id)
         elif base_container_image_id:
             build_folder = tempfile.mkdtemp()
             prep_build_folder(
@@ -212,6 +231,7 @@ echo 'export INPUTRC=/etc/inputrc' >> /etc/bash.bashrc
                 'port': str(self.container_port),
                 'PYTHONUNBUFFERED': '1',
                 'VSCODE_PORT': str(self._vscode_port),
+                'NO_CHANGE_TIMEOUT_SECONDS': '60',  # Give long-running commands (e.g., Ghidra) more time
             }
             if self.config.debug:
                 environment['DEBUG'] = 'true'
@@ -234,6 +254,9 @@ echo 'export INPUTRC=/etc/inputrc' >> /etc/bash.bashrc
                 app=self.app,
                 client=self.modal_client,
                 timeout=60 * 60,
+                cpu=2.0,  # More CPU for startup
+                memory=4096,  # 4GB memory for pydantic/FastAPI startup
+                pty=True,  # Required for tmux to work (needs Modal >= 1.2.0)
             )
             MODAL_RUNTIME_IDS[self.sid] = self.sandbox.object_id
             self.log('debug', 'Container started')
@@ -248,10 +271,81 @@ echo 'export INPUTRC=/etc/inputrc' >> /etc/bash.bashrc
 
     def close(self):
         """Closes the ModalRuntime and associated objects."""
-        super().close()
+        # Guard against double-close
+        if self.sandbox is None:
+            super().close()
+            return
 
-        if not self.attach_to_existing and self.sandbox:
-            self.sandbox.terminate()
+        # Copy workspace files back before closing
+        # Only copy back the dedicated outputs directory (small, contains only agent-created files)
+        # This avoids transferring large input files (tarballs, binaries, extracted source)
+        if self._workspace_base and not self.attach_to_existing:
+            sandbox_workspace = self.config.workspace_mount_path_in_sandbox
+
+            # Try to copy outputs directory from multiple possible locations
+            # OpenHands creates a nested /workspace/workspace/ structure
+            outputs_copied = False
+
+            # Locations to try for outputs (in order of preference)
+            outputs_locations = [
+                (f'{sandbox_workspace}/outputs', 'outputs'),
+                (f'{sandbox_workspace}/workspace/outputs', 'nested outputs'),
+            ]
+
+            for outputs_dir, desc in outputs_locations:
+                if outputs_copied:
+                    break
+                try:
+                    self.log('debug', f'Trying to copy back {desc} directory: {outputs_dir}')
+                    zip_path = self.copy_from(outputs_dir)
+
+                    with ZipFile(zip_path, 'r') as zip_ref:
+                        file_list = zip_ref.namelist()
+                        self.log('debug', f'{desc} directory contains: {file_list}')
+
+                        # Extract to workspace_base/outputs/
+                        extract_path = self._workspace_base / 'outputs'
+                        extract_path.mkdir(exist_ok=True)
+                        zip_ref.extractall(extract_path)
+                        self.log('info', f'Copied {desc} back successfully: {file_list}')
+                        outputs_copied = True
+
+                    zip_path.unlink()
+                except Exception as e:
+                    self.log('debug', f'Could not copy {desc} directory: {e}')
+
+            # Fallback: try the nested workspace directory for backwards compatibility
+            if not outputs_copied:
+                nested_workspace = f'{sandbox_workspace}/workspace'
+                try:
+                    self.log('debug', f'Fallback: trying nested workspace: {nested_workspace}')
+                    zip_path = self.copy_from(nested_workspace)
+
+                    with ZipFile(zip_path, 'r') as zip_ref:
+                        file_list = zip_ref.namelist()
+                        # Extract to workspace_base/workspace/
+                        extract_path = self._workspace_base / 'workspace'
+                        extract_path.mkdir(exist_ok=True)
+                        zip_ref.extractall(extract_path)
+                        self.log('info', f'Copied nested workspace back successfully: {file_list}')
+
+                    zip_path.unlink()
+                except Exception as e2:
+                    self.log('warning', f'Could not copy outputs or nested workspace: {e2}')
+
+        # Terminate sandbox BEFORE super().close() which shuts down the executor
+        if not self.attach_to_existing:
+            try:
+                self.log('info', f'Terminating sandbox {self.sandbox.object_id}')
+                self.sandbox.terminate()
+                self.log('info', 'Sandbox terminated successfully')
+            except Exception as e:
+                self.log('error', f'Failed to terminate sandbox: {e}')
+
+        # Mark sandbox as closed to prevent double-close
+        self.sandbox = None
+
+        super().close()
 
     @property
     def vscode_url(self) -> str | None:

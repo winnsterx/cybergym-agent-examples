@@ -5,6 +5,12 @@ file_store_path = ""
 save_trajectory_path = ""
 
 run_as_openhands = false # use root in sandbox since we are using rootless, otherwise set sandbox.user_id
+runtime = "docker"  # overridden by --runtime flag
+
+# Modal credentials
+modal_api_token_id = "ak-SZFkxukYEnRxhjxMUOuGJs"
+modal_api_token_secret = "as-pPYEplZCfEqQYhCqL2ICIf"
+
 
 [llm]
 model = ""
