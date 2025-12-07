@@ -282,14 +282,12 @@ echo 'export INPUTRC=/etc/inputrc' >> /etc/bash.bashrc
         if self._workspace_base and not self.attach_to_existing:
             sandbox_workspace = self.config.workspace_mount_path_in_sandbox
 
-            # Try to copy outputs directory from multiple possible locations
-            # OpenHands creates a nested /workspace/workspace/ structure
+            # Try to copy outputs directory
             outputs_copied = False
 
             # Locations to try for outputs (in order of preference)
             outputs_locations = [
                 (f'{sandbox_workspace}/outputs', 'outputs'),
-                (f'{sandbox_workspace}/workspace/outputs', 'nested outputs'),
             ]
 
             for outputs_dir, desc in outputs_locations:

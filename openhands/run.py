@@ -184,16 +184,36 @@ def get_api_key(model: str):
     return api_key
 
 
-def get_prompt_file(model: str, evaluation_mode: str = "exploit"):
+def get_prompt_file(model: str, evaluation_mode: str = "exploit", task_id: str = "", data_dir: Path | None = None):
     if evaluation_mode == "reverse_engineering":
         return "prompt.reverse.md"
     elif evaluation_mode == "judge":
         return "prompt.judge.md"
     elif evaluation_mode == "ctf":
+        # Use pwn-specific prompt only for defcon-ooo tasks with remote instances
+        if task_id.startswith("defcon-ooo:") and data_dir:
+            if _is_defcon_pwn_challenge(task_id, data_dir):
+                return "prompt.ctf-pwn.md"
+        # All other CTF tasks (flare-on, google-ctf, defcon RE-only) use generic RE prompt
         return "prompt.ctf.md"
     # if "o4-mini" in model or "o3-" in model:
     #     return "prompt.o4-mini.md"
     return "prompt.exploit.md"
+
+
+def _is_defcon_pwn_challenge(task_id: str, data_dir: Path) -> bool:
+    """Check if a DEF CON OOO task is a PWN challenge (has remote instance) vs RE-only."""
+    try:
+        from cybergym.task.defcon_ooo_task import load_defcon_metadata
+        metadata = load_defcon_metadata(data_dir)
+        task_meta = metadata.get(task_id, {})
+        instance = task_meta.get("instance", "")
+        port = task_meta.get("port", "")
+        return bool(instance and port)
+    except Exception as e:
+        logger.warning(f"Failed to check if {task_id} is PWN challenge: {e}")
+        # Default to RE if we can't determine (safer)
+        return False
 
 
 def support_native_tool_calling(model: str):
@@ -584,7 +604,8 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
     )
 
     # 1.2. generate the task or prepare judge workspace
-    task_dir = tmp_input_dir / "workspace"
+    # Task files go in task_files/, which becomes /workspace/task_files in container
+    task_dir = tmp_input_dir / "task_files"
     task_dir.mkdir(parents=True, exist_ok=True)
 
     if task_args.evaluation_mode == "judge":
@@ -671,7 +692,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
         f.write(tomli_w.dumps(config))
 
     # 4. run the openhands agent
-    prompt_file = get_prompt_file(openhands_args.llm.model, task_args.evaluation_mode)
+    prompt_file = get_prompt_file(openhands_args.llm.model, task_args.evaluation_mode, task_args.task_id, task_args.data_dir)
     logs_dir = log_dir / "logs"
     run_openhands(
         config_path=config_path,
@@ -702,11 +723,9 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
     # 5.5. Copy evaluation.json from workspace to log_dir if in judge mode
     if task_args.evaluation_mode == "judge":
         evaluation_dst = log_dir / "evaluation.json"
-        # Check both paths: Modal runtime creates nested workspace dir (/workspace/workspace/)
         evaluation_candidates = [
-            task_dir / "outputs" / "evaluation.json",  # New: dedicated outputs directory
+            task_dir / "outputs" / "evaluation.json",  # Dedicated outputs directory
             task_dir / "evaluation.json",
-            task_dir / "workspace" / "evaluation.json",  # Modal nested workspace (fallback)
         ]
         evaluation_src = None
         for candidate in evaluation_candidates:

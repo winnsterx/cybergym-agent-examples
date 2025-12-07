@@ -42,6 +42,7 @@ LLM_RETRY_EXCEPTIONS: tuple[type[Exception], ...] = (
     RateLimitError,
     litellm.Timeout,
     litellm.InternalServerError,
+    litellm.APIConnectionError,
     LLMNoResponseError,
 )
 
