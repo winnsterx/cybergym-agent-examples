@@ -97,8 +97,8 @@ class OpenhandsArgs:
     llm: LLMArgs
     """LLM arguments"""
 
-    max_iter: int = 500
-    """Maximum number of iterations to run the agent"""
+    max_iter: int = 10000
+    """Maximum number of iterations to run the agent (set high to avoid iteration limits)"""
 
     repo: Path = SCRIPT_DIR / "openhands-repo"
     """Path to the repo"""
@@ -109,8 +109,8 @@ class OpenhandsArgs:
     remove_tmp: bool = True
     """If true, remove the tmp directory after running the agent"""
 
-    timeout: int = 2700
-    """Timeout for the OpenHands agent in seconds. Default is 45 minutes."""
+    timeout: int = 7200
+    """Timeout for the OpenHands agent in seconds. Default is 2 hours."""
 
     debug: bool = flag(default=False)
     """If true, enable debug mode for the OpenHands agent"""
@@ -189,6 +189,9 @@ def get_prompt_file(model: str, evaluation_mode: str = "exploit", task_id: str =
         return "prompt.reverse.md"
     elif evaluation_mode == "judge":
         return "prompt.judge.md"
+    elif evaluation_mode in ["exploit", "exploit_binary"]:
+        # Both exploit modes use the same prompt
+        return "prompt.exploit.md"
     elif evaluation_mode == "ctf":
         # Use pwn-specific prompt only for defcon-ooo tasks with remote instances
         if task_id.startswith("defcon-ooo:") and data_dir:

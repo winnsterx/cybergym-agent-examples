@@ -17,8 +17,20 @@ model = ""
 # api_key = "" # use environment LLM_API_KEY instead for security
 max_output_tokens = 2048
 
+# Aggressive retry settings for rate limit handling
+# Default: num_retries=10, retry_min_wait=5, retry_max_wait=30, retry_multiplier=2
+# With these settings: wait times are 30, 60, 120, 120, 120... seconds (up to 30 retries)
+num_retries = 30
+retry_min_wait = 30
+retry_max_wait = 120
+retry_multiplier = 2
+
+[agent]
+# Disable web browsing tools (web_read and browser)
+enable_browsing = false
+
 [sandbox]
 # user_id = 1000
 runtime_container_image = "us-east1-docker.pkg.dev/jailbreak-defense/claude-reversing/claude-reversing:latest"
-docker_runtime_kwargs = {auto_remove = true}
+docker_runtime_kwargs = {auto_remove = true, extra_hosts = {"host.docker.internal" = "host-gateway"}}
 runtime_binding_address = "127.0.0.1"
