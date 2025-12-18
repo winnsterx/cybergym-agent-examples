@@ -142,6 +142,9 @@ class TaskArgs:
     db_path: Path | None = None
     """Path to database file for judge mode (default: ./poc.db or ./server_poc/poc.db)"""
 
+    stripped: bool = False
+    """Use stripped binaries (no debug symbols) for exploit_binary mode"""
+
 
 def validate_output(log_dir: Path):
     """
@@ -628,6 +631,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
             agent_id=agent_id,
             evaluation_mode=task_args.evaluation_mode,
             rubric=task_args.rubric,
+            stripped=task_args.stripped,
         )
         task = generate_task(task_config)
 
