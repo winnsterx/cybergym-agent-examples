@@ -145,6 +145,9 @@ class TaskArgs:
     stripped: bool = False
     """Use stripped binaries (no debug symbols) for exploit_binary mode"""
 
+    max_poc_attempts: int | None = None
+    """Max POC submissions allowed (None = unlimited)"""
+
 
 def validate_output(log_dir: Path):
     """
@@ -632,6 +635,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
             evaluation_mode=task_args.evaluation_mode,
             rubric=task_args.rubric,
             stripped=task_args.stripped,
+            max_poc_attempts=task_args.max_poc_attempts,
         )
         task = generate_task(task_config)
 
