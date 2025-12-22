@@ -131,7 +131,7 @@ class TaskArgs:
     """Difficulty level of the task"""
 
     evaluation_mode: str = "exploit"
-    """Evaluation mode: exploit (PoC), reverse_engineering (RE pseudocode), or judge (evaluate RE submission)"""
+    """Evaluation mode: exploit (PoC), pseudocode (RE pseudocode), or judge (evaluate RE submission)"""
 
     rubric: str = "five-point"
     """Rubric to use for RE evaluation: five-point, granular"""
@@ -143,7 +143,7 @@ class TaskArgs:
     """Path to database file for judge mode (default: ./poc.db or ./server_poc/poc.db)"""
 
     stripped: bool = False
-    """Use stripped binaries (no debug symbols) for exploit_binary mode"""
+    """Use stripped binaries (no debug symbols) for exploit_library_binary mode"""
 
     max_poc_attempts: int | None = None
     """Max POC submissions allowed (None = unlimited)"""
@@ -191,11 +191,11 @@ def get_api_key(model: str):
 
 
 def get_prompt_file(model: str, evaluation_mode: str = "exploit", task_id: str = "", data_dir: Path | None = None):
-    if evaluation_mode == "reverse_engineering":
-        return "prompt.reverse.md"
+    if evaluation_mode == "pseudocode":
+        return "prompt.pseudocode.md"
     elif evaluation_mode == "judge":
-        return "prompt.judge.md"
-    elif evaluation_mode in ["exploit", "exploit_binary"]:
+        return "prompt.pseudocode_judge.md"
+    elif evaluation_mode in ["exploit", "exploit_library_binary"]:
         # Both exploit modes use the same prompt
         return "prompt.exploit.md"
     elif evaluation_mode == "ctf":
@@ -380,84 +380,6 @@ def run_openhands(
         logger.error(f"Error running OpenHands: {e}")
     finally:
         _cleanup_docker_container(log_dir=log_dir)
-
-
-def trigger_judge_evaluation(task_args: TaskArgs, agent_id: str, log_dir: Path) -> bool:
-    """
-    Trigger judge evaluation for reverse engineering submissions.
-
-    Runs judge runner as subprocess with 10 minute timeout. Synchronous - waits
-    for completion. Saves judge output to logs. Non-fatal on failure.
-
-    Args:
-        task_args: Task configuration (task_id, data_dir, etc)
-        agent_id: Agent ID for logging context
-        log_dir: Log directory for saving judge output
-
-    Returns:
-        True if judge completed successfully (returncode 0), False otherwise
-    """
-    # Use database path from server (matches server startup configuration)
-    db_path = Path.cwd() / "server_poc" / "poc.db"
-
-    # Fall back to default poc.db if server_poc doesn't exist
-    if not db_path.parent.exists():
-        db_path = Path.cwd() / "poc.db"
-
-    # Use the judge runner script in the same directory
-    judge_script = SCRIPT_DIR / "judge.py"
-
-    cmd = [
-        "uv", "run", str(judge_script),
-        "--db", str(db_path),
-        "--data-dir", str(task_args.data_dir),
-        "--task", task_args.task_id,
-        "--model", "claude-sonnet-4-5-20250929"
-    ]
-
-    logger.info(f"Triggering judge evaluation: {' '.join(cmd)}")
-
-    try:
-        result = subprocess.run(
-            cmd,
-            timeout=1800,  # 30 minutes timeout
-            check=False,  # Don't raise on non-zero exit
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-        # Save judge output to log file
-        judge_log = log_dir / "judge.log"
-        try:
-            with open(judge_log, "w") as f:
-                f.write(f"Command: {' '.join(cmd)}\n")
-                f.write(f"Return code: {result.returncode}\n\n")
-                f.write("=== STDOUT ===\n")
-                f.write(result.stdout)
-                if result.stderr:
-                    f.write("\n=== STDERR ===\n")
-                    f.write(result.stderr)
-            logger.info(f"Judge output saved to {judge_log}")
-        except Exception as e:
-            logger.warning(f"Failed to save judge log: {e}")
-
-        if result.returncode == 0:
-            logger.info(f"Judge evaluation completed successfully for {task_args.task_id}")
-            return True
-        else:
-            logger.warning(
-                f"Judge evaluation failed (non-fatal): returncode={result.returncode}, "
-                f"stderr: {result.stderr[:200] if result.stderr else 'none'}"
-            )
-            return False
-
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Judge evaluation timed out after 600s (non-fatal)")
-        return False
-    except Exception as e:
-        logger.warning(f"Judge evaluation error: {e} (non-fatal)")
-        return False
 
 
 def extract_judge_info_from_run_dir(run_dir: Path, db_path: Path | None = None) -> tuple[str, str, str, Path]:
@@ -719,19 +641,7 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
         enable_thinking=enable_thinking,
     )
 
-    # 5. Trigger judge evaluation if RE mode (synchronous, non-fatal)
-    # Skip if we're already in judge mode or if called from run_eval (which handles judges separately)
-    if task_args.evaluation_mode == "reverse_engineering" and eval_paths is None:
-        try:
-            judge_ok = trigger_judge_evaluation(task_args, agent_id, logs_dir)
-            if judge_ok:
-                logger.info(f"Judge evaluation completed successfully for {task_args.task_id}")
-            else:
-                logger.warning(f"Judge evaluation failed (non-fatal), agent still completed")
-        except Exception as e:
-            logger.warning(f"Error triggering judge: {e} (non-fatal)")
-
-    # 5.5. Copy evaluation.json from workspace to log_dir if in judge mode
+    # 5. Copy evaluation.json from workspace to log_dir if in judge mode
     if task_args.evaluation_mode == "judge":
         evaluation_dst = log_dir / "evaluation.json"
         evaluation_candidates = [
