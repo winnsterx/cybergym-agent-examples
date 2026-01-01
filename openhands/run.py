@@ -142,11 +142,14 @@ class TaskArgs:
     db_path: Path | None = None
     """Path to database file for judge mode (default: ./poc.db or ./server_poc/poc.db)"""
 
-    stripped: bool = False
-    """Use stripped binaries (no debug symbols) for exploit_library_binary mode"""
+    strip_level: str = "strip-debug"
+    """Strip level for binaries: 'strip-debug' (default), 'strip-all', or 'no-strip'"""
 
     max_poc_attempts: int | None = None
     """Max POC submissions allowed (None = unlimited)"""
+
+    include_libs_binary: bool = True
+    """Include libs/objects in exploit_fuzzer_binary mode (default: True)"""
 
 
 def validate_output(log_dir: Path):
@@ -556,8 +559,9 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs, judge_p
             agent_id=agent_id,
             evaluation_mode=task_args.evaluation_mode,
             rubric=task_args.rubric,
-            stripped=task_args.stripped,
+            strip_level=task_args.strip_level,
             max_poc_attempts=task_args.max_poc_attempts,
+            include_libs_binary=task_args.include_libs_binary,
         )
         task = generate_task(task_config)
 
